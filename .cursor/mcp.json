@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "atlassian": {
+      "url": "https://mcp.atlassian.com/v1/sse",
+      "headers": {
+        "x-atlassian-site": "pikachu28.atlassian.net"
+      }
+    }
+  }
+}

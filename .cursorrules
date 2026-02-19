@@ -1,0 +1,44 @@
+# =============================================================
+# .cursorrules — Agentic Documentation System
+# =============================================================
+# These rules instruct Cursor AI to follow documentation-aware
+# coding practices tied to our Confluence-based doc system.
+# =============================================================
+
+## Project Context
+- This project uses an automated documentation pipeline.
+- Code changes trigger a CI/CD workflow that updates Confluence pages.
+- Confluence site: pikachu28.atlassian.net
+- Confluence space: ED1
+- Sandbox page ID: 688129
+
+## Commit Message Rules
+- Always include `[DocUpdate: <PAGE_ID>]` in commit messages when changes
+  affect documented features.
+- Format: `git commit -m "feat: description [DocUpdate: 688129]"`
+- If multiple pages are affected, include multiple tags:
+  `[DocUpdate: 688129] [DocUpdate: 123456]`
+
+## Code Standards
+- Follow PEP 8 for Python files.
+- All public functions must have docstrings.
+- Use type hints for all function parameters and return values.
+- Keep functions under 50 lines.
+
+## Documentation Awareness
+- When asked about project standards, reference Confluence documentation
+  using @Confluence MCP integration.
+- Before implementing a feature, check if specs exist in the Engineering Docs
+  space (key: ED1) on Confluence.
+- Use the command: @Confluence "search for [feature name] specs"
+
+## Testing Requirements
+- All new features must have corresponding unit tests.
+- Tests must pass before pushing (CI/CD only syncs docs on success).
+- Run: `python -m pytest tests/ -v` before committing.
+
+## File Organization
+- `/src/` — Application source code
+- `/tests/` — Unit and integration tests
+- `/scripts/` — Automation and utility scripts
+- `/docs/` — Local documentation (synced to Confluence)
