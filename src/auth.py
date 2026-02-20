@@ -177,6 +177,27 @@ class AuthService:
             )
         return True
 
+    def get_user(self, user_id: str) -> Optional[User]:
+        """
+        Retrieve a user by their ID.
+
+        Args:
+            user_id: The unique user ID.
+
+        Returns:
+            The User object if found, None otherwise.
+        """
+        return self._users.get(user_id)
+
+    def list_users(self) -> list[User]:
+        """
+        Return all registered users.
+
+        Returns:
+            A list of all User objects in the system.
+        """
+        return list(self._users.values())
+
     def logout(self, token: str) -> None:
         """Invalidate an access token."""
         self._tokens.pop(token, None)
