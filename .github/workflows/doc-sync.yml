@@ -1,86 +1,98 @@
-name: Doc Sync - Update Confluence on Push
+name: Doc Sync - DB Changes Table on PR Merge
 
 on:
-  push:
+  pull_request:
     branches: [main]
+    types: [closed]
 
 jobs:
-  test:
-    name: Run Tests
+  sync-db-docs:
+    name: Sync DB Changes to Confluence
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install pytest
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-      - name: Run tests
-        run: python -m pytest tests/ -v --tb=short || true
+    # Only run when the PR is actually merged (not just closed)
+    if: github.event.pull_request.merged == true
 
-  sync-docs:
-    name: Sync Documentation to Confluence
-    runs-on: ubuntu-latest
-    needs: test
-    if: success()
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2  # Need previous commit for diff
+          fetch-depth: 0
 
-      - name: Extract commit info
-        id: commit_info
+      - name: Extract PR and Jira info
+        id: pr_info
         run: |
-          # Get the commit message
-          COMMIT_MSG=$(git log -1 --pretty=format:"%s")
-          echo "commit_message=$COMMIT_MSG" >> $GITHUB_OUTPUT
+          # PR details
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          PR_URL="${{ github.event.pull_request.html_url }}"
+          AUTHOR="${{ github.event.pull_request.user.login }}"
+          AUTHOR_NAME="${{ github.event.pull_request.user.login }}"
+          BRANCH="${{ github.event.pull_request.head.ref }}"
 
-          # Get the author
-          AUTHOR=$(git log -1 --pretty=format:"%an")
-          echo "author=$AUTHOR" >> $GITHUB_OUTPUT
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          echo "pr_title=$PR_TITLE" >> $GITHUB_OUTPUT
+          echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
+          echo "author=$AUTHOR_NAME" >> $GITHUB_OUTPUT
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
 
-          # Get the repo name
+          # Extract Jira Story ID from PR title or branch name
+          # Looks for pattern like DEMO-123, ABC-456
+          JIRA_ID=$(echo "$PR_TITLE $BRANCH" | grep -oP '[A-Z]+-[0-9]+' | head -1 || echo "NO-JIRA-ID")
+          echo "jira_id=$JIRA_ID" >> $GITHUB_OUTPUT
+
           echo "repository=${{ github.repository }}" >> $GITHUB_OUTPUT
+          echo "timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
 
-          # Extract page ID from [DocUpdate: XXXXX] tag
-          PAGE_ID=$(echo "$COMMIT_MSG" | grep -oP '\[DocUpdate:\s*\K[0-9]+' || echo "${{ secrets.CONFLUENCE_PAGE_ID }}")
-          echo "page_id=$PAGE_ID" >> $GITHUB_OUTPUT
+      - name: Extract DB-related changed files
+        id: db_files
+        run: |
+          # Get all files changed in this PR
+          git fetch origin main
+          CHANGED_FILES=$(git diff --name-only origin/main...${{ github.event.pull_request.head.sha }})
 
-          # Check if DocUpdate tag exists
-          if echo "$COMMIT_MSG" | grep -q '\[DocUpdate:'; then
-            echo "has_doc_tag=true" >> $GITHUB_OUTPUT
+          echo "All changed files:"
+          echo "$CHANGED_FILES"
+
+          # Filter for DB-related files: .sql, migration files, db scripts
+          DB_FILES=$(echo "$CHANGED_FILES" | grep -iE '\.(sql)$|[Dd]atabase|[Mm]igration|[Ss]cripts?/|db_|_db\.' || echo "")
+
+          if [ -z "$DB_FILES" ]; then
+            DB_FILES="No DB scripts changed"
+            HAS_DB=false
           else
-            echo "has_doc_tag=false" >> $GITHUB_OUTPUT
+            HAS_DB=true
           fi
 
-      - name: Generate git diff
-        id: git_diff
-        run: |
-          # Get diff from previous commit, Base64 encode to avoid JSON issues
-          DIFF=$(git diff HEAD~1 HEAD -- '*.py' '*.js' '*.ts' '*.md' '*.yml' '*.yaml' | head -500)
-          DIFF_B64=$(echo "$DIFF" | base64 -w 0)
-          echo "diff_base64=$DIFF_B64" >> $GITHUB_OUTPUT
+          # Format the file list
+          DB_FILES_FORMATTED=$(echo "$DB_FILES" | tr '\n' ' | ' | sed 's/ | $//')
+          echo "db_files=$DB_FILES_FORMATTED" >> $GITHUB_OUTPUT
+          echo "has_db=$HAS_DB" >> $GITHUB_OUTPUT
+
+          # Also get full diff of DB files for context
+          if [ "$HAS_DB" = "true" ]; then
+            DB_DIFF=$(git diff origin/main...${{ github.event.pull_request.head.sha }} -- $(echo "$DB_FILES" | tr '\n' ' ') 2>/dev/null | head -200)
+            DB_DIFF_B64=$(echo "$DB_DIFF" | base64 -w 0)
+          else
+            DB_DIFF_B64=$(echo "No DB changes" | base64 -w 0)
+          fi
+          echo "db_diff_base64=$DB_DIFF_B64" >> $GITHUB_OUTPUT
 
       - name: Send to n8n webhook
-        if: steps.commit_info.outputs.has_doc_tag == 'true'
         run: |
           curl -X POST "${{ secrets.N8N_WEBHOOK_URL }}" \
             -H "Content-Type: application/json" \
             -H "X-Auth-Token: ${{ secrets.N8N_AUTH_TOKEN }}" \
-            -d '{
-              "repository": "${{ steps.commit_info.outputs.repository }}",
-              "commit_message": "${{ steps.commit_info.outputs.commit_message }}",
-              "author": "${{ steps.commit_info.outputs.author }}",
-              "page_id": "${{ steps.commit_info.outputs.page_id }}",
-              "diff_base64": "${{ steps.git_diff.outputs.diff_base64 }}",
-              "timestamp": "${{ github.event.head_commit.timestamp }}",
-              "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-            }'
-
-      - name: Skip - No DocUpdate tag
-        if: steps.commit_info.outputs.has_doc_tag != 'true'
-        run: echo "⏭️ No [DocUpdate] tag found in commit message. Skipping doc sync."
+            -d "{
+              \"jira_id\": \"${{ steps.pr_info.outputs.jira_id }}\",
+              \"author\": \"${{ steps.pr_info.outputs.author }}\",
+              \"reviewer\": \"Morgan Housel\",
+              \"pr_number\": \"${{ steps.pr_info.outputs.pr_number }}\",
+              \"pr_title\": \"${{ steps.pr_info.outputs.pr_title }}\",
+              \"pr_url\": \"${{ steps.pr_info.outputs.pr_url }}\",
+              \"branch\": \"${{ steps.pr_info.outputs.branch }}\",
+              \"db_files\": \"${{ steps.db_files.outputs.db_files }}\",
+              \"has_db_changes\": \"${{ steps.db_files.outputs.has_db }}\",
+              \"db_diff_base64\": \"${{ steps.db_files.outputs.db_diff_base64 }}\",
+              \"repository\": \"${{ steps.pr_info.outputs.repository }}\",
+              \"page_id\": \"${{ secrets.CONFLUENCE_PAGE_ID }}\",
+              \"timestamp\": \"${{ steps.pr_info.outputs.timestamp }}\"
+            }"
