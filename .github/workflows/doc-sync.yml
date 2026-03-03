@@ -1,4 +1,4 @@
-name: Doc Sync - DB Changes Table on PR Merge
+name: Doc Sync - AI Summary on PR Merge
 
 on:
   pull_request:
@@ -6,10 +6,9 @@ on:
     types: [closed]
 
 jobs:
-  sync-db-docs:
-    name: Sync DB Changes to Confluence
+  ai-doc-sync:
+    name: AI Documentation Sync to Confluence
     runs-on: ubuntu-latest
-    # Only run when the PR is actually merged (not just closed)
     if: github.event.pull_request.merged == true
 
     steps:
@@ -17,70 +16,67 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Extract PR and Jira info
+      - name: Extract PR info
         id: pr_info
         run: |
-          # PR details
           PR_NUMBER="${{ github.event.pull_request.number }}"
           PR_TITLE="${{ github.event.pull_request.title }}"
           PR_URL="${{ github.event.pull_request.html_url }}"
           AUTHOR="${{ github.event.pull_request.user.login }}"
-          AUTHOR_NAME="${{ github.event.pull_request.user.login }}"
           BRANCH="${{ github.event.pull_request.head.ref }}"
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.merge_commit_sha }}"
 
           echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
           echo "pr_title=$PR_TITLE" >> $GITHUB_OUTPUT
           echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
-          echo "author=$AUTHOR_NAME" >> $GITHUB_OUTPUT
+          echo "author=$AUTHOR" >> $GITHUB_OUTPUT
           echo "branch=$BRANCH" >> $GITHUB_OUTPUT
-
-          # Extract Jira Story ID from PR title or branch name
-          # Looks for pattern like DEMO-123, ABC-456
-          JIRA_ID=$(echo "$PR_TITLE $BRANCH" | grep -oP '[A-Z]+-[0-9]+' | head -1 || echo "NO-JIRA-ID")
-          echo "jira_id=$JIRA_ID" >> $GITHUB_OUTPUT
-
+          echo "base_sha=$BASE_SHA" >> $GITHUB_OUTPUT
+          echo "head_sha=$HEAD_SHA" >> $GITHUB_OUTPUT
           echo "repository=${{ github.repository }}" >> $GITHUB_OUTPUT
           echo "timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
 
-      - name: Extract DB-related changed files
-        id: db_files
+          # Extract Jira story ID from PR title or branch (e.g. DEMO-1, SCRUM-42)
+          JIRA_ID=$(echo "$PR_TITLE $BRANCH" | grep -oP '[A-Z]+-[0-9]+' | head -1 || echo "NO-ID")
+          echo "jira_id=$JIRA_ID" >> $GITHUB_OUTPUT
+
+      - name: Get ALL changed files and full diff
+        id: diff_info
         run: |
-          # Get all files changed in this PR
-          git fetch origin main
-          CHANGED_FILES=$(git diff --name-only origin/main...${{ github.event.pull_request.head.sha }})
+          BASE="${{ steps.pr_info.outputs.base_sha }}"
+          HEAD="${{ steps.pr_info.outputs.head_sha }}"
 
-          echo "All changed files:"
-          echo "$CHANGED_FILES"
+          # Get list of ALL changed files
+          ALL_FILES=$(git diff --name-only $BASE $HEAD 2>/dev/null || git diff --name-only HEAD~1 HEAD)
+          echo "Changed files:"
+          echo "$ALL_FILES"
 
-          # Filter for DB-related files: .sql, migration files, db scripts
-          DB_FILES=$(echo "$CHANGED_FILES" | grep -iE '\.(sql)$|[Dd]atabase|[Mm]igration|[Ss]cripts?/|db_|_db\.' || echo "")
+          # Format file list (pipe separated)
+          FILES_LIST=$(echo "$ALL_FILES" | tr '\n' ' | ' | sed 's/ | $//')
+          echo "files_list=$FILES_LIST" >> $GITHUB_OUTPUT
 
-          if [ -z "$DB_FILES" ]; then
-            DB_FILES="No DB scripts changed"
-            HAS_DB=false
-          else
-            HAS_DB=true
+          # Get the full diff (all files, limited to 300 lines to avoid payload limits)
+          FULL_DIFF=$(git diff $BASE $HEAD 2>/dev/null | head -300)
+          if [ -z "$FULL_DIFF" ]; then
+            FULL_DIFF=$(git diff HEAD~1 HEAD | head -300)
           fi
 
-          # Format the file list
-          DB_FILES_FORMATTED=$(echo "$DB_FILES" | tr '\n' ' | ' | sed 's/ | $//')
-          echo "db_files=$DB_FILES_FORMATTED" >> $GITHUB_OUTPUT
-          echo "has_db=$HAS_DB" >> $GITHUB_OUTPUT
+          # Base64 encode the full diff to avoid JSON escaping issues
+          DIFF_B64=$(echo "$FULL_DIFF" | base64 -w 0)
+          echo "diff_base64=$DIFF_B64" >> $GITHUB_OUTPUT
 
-          # Also get full diff of DB files for context
-          if [ "$HAS_DB" = "true" ]; then
-            DB_DIFF=$(git diff origin/main...${{ github.event.pull_request.head.sha }} -- $(echo "$DB_FILES" | tr '\n' ' ') 2>/dev/null | head -200)
-            DB_DIFF_B64=$(echo "$DB_DIFF" | base64 -w 0)
-          else
-            DB_DIFF_B64=$(echo "No DB changes" | base64 -w 0)
-          fi
-          echo "db_diff_base64=$DB_DIFF_B64" >> $GITHUB_OUTPUT
+          # Count files changed
+          FILE_COUNT=$(echo "$ALL_FILES" | wc -l)
+          echo "file_count=$FILE_COUNT" >> $GITHUB_OUTPUT
 
-      - name: Send to n8n webhook
+      - name: Send to n8n for AI summarization
         run: |
-          curl -X POST "${{ secrets.N8N_WEBHOOK_URL }}" \
+          curl -f -X POST "${{ secrets.N8N_WEBHOOK_URL }}" \
             -H "Content-Type: application/json" \
             -H "X-Auth-Token: ${{ secrets.N8N_AUTH_TOKEN }}" \
+            --connect-timeout 30 \
+            --max-time 60 \
             -d "{
               \"jira_id\": \"${{ steps.pr_info.outputs.jira_id }}\",
               \"author\": \"${{ steps.pr_info.outputs.author }}\",
@@ -89,10 +85,11 @@ jobs:
               \"pr_title\": \"${{ steps.pr_info.outputs.pr_title }}\",
               \"pr_url\": \"${{ steps.pr_info.outputs.pr_url }}\",
               \"branch\": \"${{ steps.pr_info.outputs.branch }}\",
-              \"db_files\": \"${{ steps.db_files.outputs.db_files }}\",
-              \"has_db_changes\": \"${{ steps.db_files.outputs.has_db }}\",
-              \"db_diff_base64\": \"${{ steps.db_files.outputs.db_diff_base64 }}\",
+              \"files_changed\": \"${{ steps.diff_info.outputs.files_list }}\",
+              \"file_count\": \"${{ steps.diff_info.outputs.file_count }}\",
+              \"diff_base64\": \"${{ steps.diff_info.outputs.diff_base64 }}\",
               \"repository\": \"${{ steps.pr_info.outputs.repository }}\",
               \"page_id\": \"${{ secrets.CONFLUENCE_PAGE_ID }}\",
               \"timestamp\": \"${{ steps.pr_info.outputs.timestamp }}\"
             }"
+          echo "Webhook sent successfully"
