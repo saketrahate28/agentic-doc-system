@@ -1,27 +1,20 @@
 /*
-  ──────────────────────────────────────────────────────────
-  NODE 6: "Append Row" — Code Node (JavaScript)
+  n8n Node 5: "Append Row"
   
-  This runs AFTER:
-    - "Build Row" node (has jira_id, pr_url, etc.)
-    - AI Agent node   (has the AI-generated summary)
-    - GET Page node   (has current page version + XHTML body)
-  
-  It builds the updated Confluence XHTML page body with the
-  new row appended, and the AI summary in the Pkg Changes column.
-  ──────────────────────────────────────────────────────────
+  Appends a new row to the Confluence table using:
+  - Data from "Build Row" node (jira_id, author, pr, files)
+  - AI-generated summary from the AI Agent node
+  - Current page body + version from the GET Page node
 */
 
 const items = $input.all();
 const item = items[0];
 
-// ── Data from previous nodes ──────────────────────────────
-
-// From GET Confluence page
+// ── From GET Confluence page ──────────────────────────────
 const currentVersion = item.json.version?.number ?? 1;
 const currentBody = item.json.body?.storage?.value ?? '';
 
-// From "Build Row" node
+// ── From "Build Row" node ─────────────────────────────────
 const buildRow = $('Build Row').item.json;
 const pageId = buildRow.page_id ?? '688129';
 const jiraId = buildRow.jira_id ?? 'NO-ID';
@@ -30,84 +23,77 @@ const reviewer = buildRow.reviewer ?? 'Morgan Housel';
 const prNumber = buildRow.pr_number ?? '';
 const prTitle = buildRow.pr_title ?? '';
 const prUrl = buildRow.pr_url ?? '#';
-const dbFiles = buildRow.db_files ?? '';
+const filesChanged = buildRow.files_changed ?? '';
+const fileCount = buildRow.file_count ?? '?';
 
-// ── AI Agent output ──────────────────────────────────────
-// The AI Agent node outputs to item.json.output (for Basic LLM Chain)
-// or item.json.text depending on the node type used
+// ── AI Agent output ───────────────────────────────────────
+// Tries multiple output paths depending on which AI node is used
 let aiSummary = '';
-
 try {
-  // Try different output paths depending on which AI node was used
-  aiSummary = item.json.output           // AI Agent node
-    ?? item.json.text             // Basic LLM Chain
-    ?? item.json.choices?.[0]?.message?.content  // OpenAI direct
-    ?? item.json.candidates?.[0]?.content?.parts?.[0]?.text  // Gemini direct
-    ?? '';
+  aiSummary = (
+    item.json.output                                                    // n8n AI Agent
+    ?? item.json.text                                                   // Basic LLM Chain  
+    ?? item.json.choices?.[0]?.message?.content                        // OpenAI direct
+    ?? item.json.candidates?.[0]?.content?.parts?.[0]?.text           // Gemini direct
+    ?? ''
+  ).toString().trim().replace(/\n+/g, ' ');
+} catch (e) { aiSummary = ''; }
 
-  aiSummary = aiSummary.toString().trim().replace(/\n/g, ' ');
-} catch (e) {
-  aiSummary = '';
-}
+// Fallback if AI didn't return anything
+const summaryCell = aiSummary
+  ? aiSummary
+  : `Changed ${fileCount} file(s): ${filesChanged.substring(0, 150)}`;
 
-// Fallback: use DB files string if AI didn't produce output
-const pkgChanges = aiSummary
-  ? `${aiSummary}<br/><em style="font-size:11px;color:#666;">(Files: ${dbFiles})</em>`
-  : dbFiles || 'No DB scripts changed';
-
-// ── Build the new table row ──────────────────────────────
-
+// ── Build new table row ──────────────────────────────────
+const prShortTitle = prTitle.substring(0, 60);
 const newRow = `<tr>
-  <td><p><strong><a href="https://pikachu28.atlassian.net/jira/software/projects/DEMO/boards">${jiraId}</a></strong></p></td>
+  <td><p><strong>${jiraId}</strong></p></td>
   <td><p>${author}</p></td>
-  <td><p><a href="${prUrl}">Pull request ${prNumber}: ${prTitle.substring(0, 60)}</a></p></td>
-  <td><p>${pkgChanges}</p></td>
+  <td><p><a href="${prUrl}">PR #${prNumber}: ${prShortTitle}</a></p></td>
+  <td><p>${summaryCell}</p></td>
   <td><p>${reviewer}</p></td>
 </tr>`;
 
-// ── Append to existing or create new table ───────────────
-
+// ── Append to existing table or create new one ────────────
 let updatedBody;
 
-if (currentBody.includes('<table>') || currentBody.includes('<table ')) {
+if (currentBody.includes('<table')) {
   if (currentBody.includes('</tbody>')) {
     updatedBody = currentBody.replace('</tbody>', `${newRow}\n</tbody>`);
   } else {
     updatedBody = currentBody.replace('</table>', `${newRow}\n</table>`);
   }
 } else {
-  // First run — create the table from scratch
   updatedBody = `
-<h2>Database Changes Log</h2>
-<p>Auto-maintained by the Agentic Documentation System. Updated on every PR merge to <code>main</code>.</p>
+<h2>PR Changes Log — AI Summaries</h2>
+<p>Auto-maintained by the Agentic Documentation System. Every merged PR adds a row.</p>
 <table>
   <tbody>
     <tr>
-      <th><p><strong>User Story</strong></p></th>
-      <th><p><strong>User Name</strong></p></th>
-      <th><p><strong>PR</strong></p></th>
-      <th><p><strong>Pkg Changes (DB Scripts)</strong></p></th>
+      <th><p><strong>Story</strong></p></th>
+      <th><p><strong>Author</strong></p></th>
+      <th><p><strong>Pull Request</strong></p></th>
+      <th><p><strong>AI Summary of Changes</strong></p></th>
       <th><p><strong>Reviewer</strong></p></th>
     </tr>
     ${newRow}
   </tbody>
 </table>
-<p><em>Powered by n8n + AI Agent + GitHub Actions</em></p>`;
+<p><em>Powered by GitHub Actions + n8n + AI Agent</em></p>`;
 }
 
-// ── Build the PUT body ───────────────────────────────────
-
+// ── Build the final PUT payload ───────────────────────────
 item.json.put_body = {
   id: pageId,
   status: 'current',
-  title: 'PI DB Changes - Automated Log',
+  title: 'PR Changes Log - AI Automated',
   body: {
     representation: 'storage',
     value: updatedBody
   },
   version: {
     number: currentVersion + 1,
-    message: `PR #${prNumber} merged: ${jiraId} by ${author}`
+    message: `PR #${prNumber} merged by ${author}: ${jiraId}`
   }
 };
 

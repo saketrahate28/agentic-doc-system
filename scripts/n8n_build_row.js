@@ -1,21 +1,11 @@
 /*
-  ============================================================
-  UPDATED n8n WORKFLOW — with AI Agent Node
-  ============================================================
-
-  New 7-node pipeline:
-  1. Webhook          → Receives PR merge payload from GitHub Actions
-  2. Build Row        → Extracts & structures PR/Jira/DB data
-  3. AI Agent         → Generates human-readable DB change summary
-  4. Merge AI Output  → Combines AI summary back into the row data
-  5. GET Page         → Fetches current Confluence page + version
-  6. Append Row       → Appends new table row with AI summary
-  7. PUT Page         → Publishes updated page to Confluence
-
-  ──────────────────────────────────────────────────────────
-  NODE 2: "Build Row" — Code Node (JavaScript)
-  Purpose: Extract fields from webhook, prepare for AI Agent
-  ──────────────────────────────────────────────────────────
+  n8n Node 2: "Build Row"
+  
+  Extracts all PR data from webhook, decodes the full diff,
+  and composes a rich AI prompt for ALL changes (not just DB).
+  
+  Input:  Webhook payload from GitHub Actions
+  Output: Structured data + ai_prompt field for the AI Agent node
 */
 
 const items = $input.all();
@@ -30,51 +20,59 @@ const reviewer = src.reviewer ?? 'Morgan Housel';
 const prNumber = src.pr_number ?? '';
 const prTitle = src.pr_title ?? '';
 const prUrl = src.pr_url ?? '#';
-const dbFiles = src.db_files ?? 'No DB scripts changed';
+const filesChanged = src.files_changed ?? src.db_files ?? 'No files listed';
+const fileCount = src.file_count ?? '?';
 const pageId = src.page_id ?? '688129';
-const hasDb = src.has_db_changes === 'true';
+const repository = src.repository ?? '';
 
-// Decode the base64 diff so AI Agent can read it
-let dbDiff = 'No diff available';
-if (src.db_diff_base64) {
-  try {
-    dbDiff = Buffer.from(src.db_diff_base64, 'base64').toString('utf-8');
-  } catch (e) {
-    dbDiff = atob(src.db_diff_base64);
+// Decode the full diff (base64 → readable text)
+let fullDiff = 'Diff not available';
+try {
+  const b64 = src.diff_base64 ?? src.db_diff_base64 ?? '';
+  if (b64) {
+    fullDiff = Buffer.from(b64, 'base64').toString('utf-8');
   }
+} catch (e) {
+  fullDiff = 'Could not decode diff: ' + e.message;
 }
 
-// Compose the AI prompt — will be consumed by the AI Agent node
-item.json.ai_prompt = `You are a technical documentation assistant.
+// Truncate diff to fit within LLM context limits (~2000 chars)
+const truncatedDiff = fullDiff.length > 2000
+  ? fullDiff.substring(0, 2000) + '\n... [diff truncated]'
+  : fullDiff;
 
-A developer just merged a Pull Request. Analyze the database change below and write a 
-ONE-sentence plain-English summary suitable for a Confluence changelog table cell.
+// Compose the AI prompt — covers ALL changes, not just DB
+item.json.ai_prompt = `You are a senior software engineer writing a concise Confluence changelog entry.
 
-Requirements:
-- Max 20 words
-- Must mention what table/object changed and WHY
-- No markdown, no bullet points — plain text only
-- Example: "Added auth_log table to track login events per user session."
+Analyze the pull request below and write a 2-3 sentence plain-English summary that:
+1. States WHAT was changed (files/modules affected)
+2. States WHY or WHAT PURPOSE the change serves
+3. Notes any important technical details (schema changes, API changes, breaking changes)
 
-Jira Story: ${jiraId}
-PR Title: ${prTitle}
+Rules:
+- No markdown, no bullet points, no headings — plain text only
+- Maximum 60 words
+- Be specific about what actually changed
 
-DB Files Changed:
-${dbFiles}
+Pull Request: #${prNumber} — ${prTitle}
+Author: ${author}
+Repository: ${repository}
+Files Changed (${fileCount} files): ${filesChanged}
 
-SQL Diff:
-${dbDiff.substring(0, 800)}
+Full Diff:
+${truncatedDiff}
 
-Respond with ONLY the one-sentence summary.`;
+Write ONLY the summary paragraph, nothing else.`;
 
-// Pass all fields through for later nodes
+// Pass all fields through for downstream nodes
 item.json.jira_id = jiraId;
 item.json.author = author;
 item.json.reviewer = reviewer;
 item.json.pr_number = prNumber;
 item.json.pr_title = prTitle;
 item.json.pr_url = prUrl;
-item.json.db_files = dbFiles;
+item.json.files_changed = filesChanged;
+item.json.file_count = fileCount;
 item.json.page_id = pageId;
 
 return items;
